@@ -1,4 +1,4 @@
-📁 청년인쇄사AI 폴더
-├─ main.py            (파이썬 서버 파일)
-├─ requirements.txt   <-- [지금 추가할 파일]
-└─ YBPRINT_V98.html   (웹 화면 파일)
+fastapi
+uvicorn
+pymupdf
+python-multipart
