@@ -88,6 +88,17 @@ async def submit_inquiry(
     print(f" • 연 락 처 : {phone}")
     print(f" • 첨부원고 : {file_name}")
     print(f" • 검수사양 : {spec}")
+    import os
+from fastapi.responses import FileResponse
+
+# (기존 코드 아래에 추가)
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    file_path = f"./uploads/{filename}" # 파일이 저장되는 폴더 경로에 맞춰 수정해야 할 수 있습니다.
+    if os.path.exists(file_path):
+        return FileResponse(path=file_path, filename=filename)
+    else:
+        return {"detail": "File not found"}
     print(f" • 문의내용 : {inquiry}")
     print("=" * 60)
     
