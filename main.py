@@ -1,7 +1,10 @@
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from datetime import datetime
 import fitz  # PyMuPDF
+import os
+import urllib.parse
 
 app = FastAPI()
 
@@ -13,6 +16,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 파일 저장용 uploads 폴더 자동 생성
+UPLOAD_DIR = "./uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # In-memory inquiry store
 inquiries_db = []
@@ -29,6 +36,13 @@ def get_inquiries():
 async def scan_pdf(file: UploadFile = File(...)):
     try:
         content = await file.read()
+        
+        # 📁 1. 고객이 올린 실제 파일을 서버 uploads 폴더에 저장 (관리자 다운로드용)
+        file_path = os.path.join(UPLOAD_DIR, file.filename)
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        # 🔍 2. PyMuPDF 분석
         doc = fitz.open(stream=content, filetype="pdf")
         total_pages = len(doc)
         
@@ -88,18 +102,21 @@ async def submit_inquiry(
     print(f" • 연 락 처 : {phone}")
     print(f" • 첨부원고 : {file_name}")
     print(f" • 검수사양 : {spec}")
-    import os
-from fastapi.responses import FileResponse
-
-# (기존 코드 아래에 추가)
-@app.get("/download/{filename}")
-async def download_file(filename: str):
-    file_path = f"./uploads/{filename}" # 파일이 저장되는 폴더 경로에 맞춰 수정해야 할 수 있습니다.
-    if os.path.exists(file_path):
-        return FileResponse(path=file_path, filename=filename)
-    else:
-        return {"detail": "File not found"}
     print(f" • 문의내용 : {inquiry}")
     print("=" * 60)
     
     return {"status": "success", "message": "Inquiry recorded successfully", "data": record}
+
+# 📥 관리자 첨부파일 다운로드 API
+@app.get("/download/{filename}")
+async def download_file(filename: str):
+    decoded_name = urllib.parse.unquote(filename)
+    file_path = os.path.join(UPLOAD_DIR, decoded_name)
+    if os.path.exists(file_path):
+        return FileResponse(
+            path=file_path, 
+            filename=decoded_name,
+            media_type="application/octet-stream"
+        )
+    else:
+        return {"detail": "File not found"}
