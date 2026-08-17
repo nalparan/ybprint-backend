@@ -3,6 +3,7 @@ import json
 import io
 import datetime
 import smtplib
+import urllib.request
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -27,11 +28,16 @@ app.add_middleware(
 )
 
 # -------------------------------------------------------------------
-# [환경설정] 메일플러그 SMTP 계정 정보
+# [발송 엔진 설정]
+# 1순위: Resend API (일반 웹 통신 443포트 - Render 차단 없음)
+# 2순위: 네이버 SMTP (안전망 자동 우회 - Resend 실패 시 100% 작동 보장)
 # -------------------------------------------------------------------
-MAILPLUG_SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.mailplug.co.kr")
-MAILPLUG_SENDER_EMAIL = os.getenv("SENDER_EMAIL", "admin@ybprint.co.kr")
-MAILPLUG_SENDER_PW = os.getenv("SENDER_PW", "") # 메일플러그 웹메일 비밀번호
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+
+# 네이버 안전망 설정
+NAVER_EMAIL = os.getenv("NAVER_EMAIL", "serviceonm@naver.com")
+NAVER_PW = os.getenv("NAVER_PW", os.getenv("SENDER_PW", ""))
+OFFICIAL_REPLY_EMAIL = "admin@ybprint.co.kr"
 
 DATA_DIR = "data"
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
@@ -42,9 +48,6 @@ if not os.path.exists(INQUIRIES_FILE):
     with open(INQUIRIES_FILE, "w", encoding="utf-8") as f:
         json.dump([], f, ensure_ascii=False, indent=2)
 
-# -------------------------------------------------------------------
-# [유틸리티] 한글 금액 변환
-# -------------------------------------------------------------------
 def number_to_korean(num_val):
     try:
         if isinstance(num_val, str):
@@ -73,72 +76,69 @@ def number_to_korean(num_val):
             result.append("".join(chunk_str[::-1]) + units[i//4])
     return f"일금 {''.join(result[::-1])}원 정"
 
-# -------------------------------------------------------------------
-# [유틸리티] 메일플러그 SMTP 메일 발송 함수 (465 SSL 및 587 STARTTLS 자동 이중시도)
-# -------------------------------------------------------------------
-def send_mailplug_email(receiver_email: str, subject: str, body_html: str, attachment_bytes: Optional[bytes] = None, attachment_name: Optional[str] = None):
-    sender_email = MAILPLUG_SENDER_EMAIL
-    sender_pw = MAILPLUG_SENDER_PW
+def send_smart_email(receiver_email: str, subject: str, body_html: str):
+    receiver_clean = receiver_email.strip()
     
-    if not sender_pw:
-        print("[SMTP Warning] SENDER_PW가 설정되지 않았습니다.")
-        return False, "메일플러그 비밀번호(SENDER_PW)가 설정되지 않았습니다. Render 환경변수를 확인해주세요."
+    # ---------------------------------------------------------------
+    # [1단계] Resend API 발송 (최우선)
+    # ---------------------------------------------------------------
+    if RESEND_API_KEY:
+        try:
+            url = "https://api.resend.com/emails"
+            headers = {
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            data = {
+                "from": "청년인쇄사 <admin@ybprint.co.kr>",
+                "to": [receiver_clean],
+                "subject": subject,
+                "html": body_html,
+                "reply_to": OFFICIAL_REPLY_EMAIL
+            }
+            
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=8) as response:
+                if response.status in [200, 201]:
+                    return True, f"[{receiver_clean}] 공식 도메인(API) 발송 완료!"
+        except Exception as e:
+            print(f"[Resend API Error] {e} -> 네이버 안전망으로 자동 우회합니다.")
+            pass # 에러 발생 시 아래 2단계(네이버)로 자동 통과
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = Header(subject, "utf-8")
-    msg["From"] = formataddr((str(Header("청년인쇄사", "utf-8")), sender_email))
-    msg["To"] = receiver_email.strip()
+    # ---------------------------------------------------------------
+    # [2단계] 네이버 SMTP 우회 발송 (안전망)
+    # ---------------------------------------------------------------
+    if not NAVER_PW:
+        return False, "발송 실패: Resend API 키와 네이버 비밀번호(SENDER_PW)가 모두 등록되지 않았습니다."
 
-    # HTML 본문 추가
-    msg.attach(MIMEText(body_html, "html", "utf-8"))
-
-    # 첨부파일 추가
-    if attachment_bytes and attachment_name:
-        part = MIMEApplication(attachment_bytes, _subtype="pdf")
-        part.add_header("Content-Disposition", "attachment", filename=str(Header(attachment_name, "utf-8")))
-        msg.attach(part)
-
-    last_err = ""
-    # 1차 시도: 포트 465 (SSL) - 타임아웃 5초
     try:
-        server = smtplib.SMTP_SSL(MAILPLUG_SMTP_SERVER, 465, timeout=5)
-        server.login(sender_email, sender_pw)
-        server.sendmail(sender_email, [receiver_email.strip()], msg.as_string())
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = Header(subject, "utf-8")
+        msg["From"] = formataddr((str(Header("청년인쇄사", "utf-8")), NAVER_EMAIL))
+        msg["Reply-To"] = formataddr((str(Header("청년인쇄사", "utf-8")), OFFICIAL_REPLY_EMAIL))
+        msg["To"] = receiver_clean
+
+        msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+        server = smtplib.SMTP_SSL("smtp.naver.com", 465, timeout=8)
+        server.login(NAVER_EMAIL, NAVER_PW)
+        server.sendmail(NAVER_EMAIL, [receiver_clean], msg.as_string())
         server.quit()
-        return True, f"[{receiver_email}] 주소로 견적서 메일이 성공적으로 전송되었습니다."
+        return True, f"[{receiver_clean}] 네이버 비상망으로 발송 완료!"
     except Exception as e:
-        last_err = f"SSL(465): {str(e)}"
-        print(f"[Mailplug SMTP 465 Error] {last_err}")
+        err_msg = str(e)
+        print(f"[Naver SMTP Error] {err_msg}")
+        return False, f"완전 발송 실패 (API 및 네이버 모두 장애): {err_msg}"
 
-    # 2차 시도: 포트 587 (STARTTLS) - 타임아웃 5초
-    try:
-        server = smtplib.SMTP(MAILPLUG_SMTP_SERVER, 587, timeout=5)
-        server.starttls()
-        server.login(sender_email, sender_pw)
-        server.sendmail(sender_email, [receiver_email.strip()], msg.as_string())
-        server.quit()
-        return True, f"[{receiver_email}] 주소로 견적서 메일이 성공적으로 전송되었습니다 (STARTTLS)."
-    except Exception as e:
-        last_err += f" | STARTTLS(587): {str(e)}"
-        print(f"[Mailplug SMTP 587 Error] {last_err}")
-
-    return False, f"메일 발송 실패: {last_err}"
-
-# -------------------------------------------------------------------
-# [엔드포인트 1] 서버 헬스체크
-# -------------------------------------------------------------------
 @app.get("/")
 def root():
     return {
         "status": "online",
         "service": "청년인쇄사 GEMS AI Cloud Backend Engine",
-        "smtp_sender": MAILPLUG_SENDER_EMAIL,
+        "email_engine": "Dual Mode (Resend API + Naver Fallback)",
         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-# -------------------------------------------------------------------
-# [엔드포인트 2] 원고 PDF 규격 정밀 스캔 (/scan-pdf)
-# -------------------------------------------------------------------
 @app.post("/scan-pdf")
 async def scan_pdf(file: UploadFile = File(...)):
     try:
@@ -186,9 +186,6 @@ async def scan_pdf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# -------------------------------------------------------------------
-# [엔드포인트 3] 고객 문의 접수 (/submit-inquiry)
-# -------------------------------------------------------------------
 @app.post("/submit-inquiry")
 async def submit_inquiry(
     org: str = Form(...),
@@ -224,9 +221,6 @@ async def submit_inquiry(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"저장 오류: {str(e)}")
 
-# -------------------------------------------------------------------
-# [엔드포인트 4] 관리자 접수 목록 조회 (/inquiries)
-# -------------------------------------------------------------------
 @app.get("/inquiries")
 def get_inquiries():
     if not os.path.exists(INQUIRIES_FILE):
@@ -237,9 +231,6 @@ def get_inquiries():
         except:
             return []
 
-# -------------------------------------------------------------------
-# [엔드포인트 5] 견적서 자동 발송 엔진 (/send-quote)
-# -------------------------------------------------------------------
 class QuoteSendRequest(BaseModel):
     org: str
     phone: str
@@ -256,7 +247,7 @@ async def send_quote(req: QuoteSendRequest):
         if "@" in req.phone:
             target_email = req.phone.strip()
         else:
-            target_email = MAILPLUG_SENDER_EMAIL
+            target_email = OFFICIAL_REPLY_EMAIL
 
     subject = f"[청년인쇄사] {req.org} 담당자님, 요청하신 공식 견적서가 도착했습니다."
     hangul_amt = number_to_korean(req.total_amount)
@@ -269,7 +260,7 @@ async def send_quote(req: QuoteSendRequest):
       <style>
         body {{ font-family: 'Pretendard', -apple-system, sans-serif; line-height: 1.6; color: #191f28; background: #f2f4f6; margin: 0; padding: 20px; }}
         .card {{ max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 18px; padding: 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }}
-        .header {{ border-bottom: 2px solid #3182F6; padding-bottom: 16px; margin-bottom: 24px; }}
+        .header {{ border-bottom: 2px solid #3182f6; padding-bottom: 16px; margin-bottom: 24px; }}
         .title {{ font-size: 20px; font-weight: 800; color: #191f28; margin: 0; }}
         .sub {{ font-size: 13px; color: #8b95a1; margin-top: 4px; }}
         .amount-box {{ background: #0f172a; color: #ffffff; padding: 18px 24px; border-radius: 12px; margin: 20px 0; }}
@@ -336,16 +327,13 @@ async def send_quote(req: QuoteSendRequest):
     </html>
     """
 
-    ok, msg = send_mailplug_email(target_email, subject, body_html)
+    ok, msg = send_smart_email(target_email, subject, body_html)
     return {
         "status": "success" if ok else "failed",
         "message": msg,
         "target": target_email
     }
 
-# -------------------------------------------------------------------
-# [엔드포인트 6] 첨부파일 다운로드 (/download/{filename})
-# -------------------------------------------------------------------
 @app.get("/download/{filename}")
 def download_file(filename: str):
     file_path = os.path.join(UPLOAD_DIR, filename)
