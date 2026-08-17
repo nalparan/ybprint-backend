@@ -17,7 +17,7 @@ from typing import Optional, List
 
 app = FastAPI(title="청년인쇄사 GEMS AI 백엔드 엔진")
 
-# CORS 설정 (ybprint.co.kr 및 로컬 환경 허용)
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +30,6 @@ app.add_middleware(
 # [환경설정] 메일플러그 SMTP 계정 정보
 # -------------------------------------------------------------------
 MAILPLUG_SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.mailplug.co.kr")
-MAILPLUG_SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
 MAILPLUG_SENDER_EMAIL = os.getenv("SENDER_EMAIL", "admin@ybprint.co.kr")
 MAILPLUG_SENDER_PW = os.getenv("SENDER_PW", "") # 메일플러그 웹메일 비밀번호
 
@@ -75,44 +74,55 @@ def number_to_korean(num_val):
     return f"일금 {''.join(result[::-1])}원 정"
 
 # -------------------------------------------------------------------
-# [유틸리티] 메일플러그 SMTP 메일 발송 함수
+# [유틸리티] 메일플러그 SMTP 메일 발송 함수 (465 SSL 및 587 STARTTLS 자동 이중시도)
 # -------------------------------------------------------------------
 def send_mailplug_email(receiver_email: str, subject: str, body_html: str, attachment_bytes: Optional[bytes] = None, attachment_name: Optional[str] = None):
     sender_email = MAILPLUG_SENDER_EMAIL
     sender_pw = MAILPLUG_SENDER_PW
     
     if not sender_pw:
-        print("[SMTP Warning] SENDER_PW가 설정되지 않았습니다. 메일 전송을 스킵하고 성공 로그를 남깁니다.")
-        return True, "메일 발송 대기 (비밀번호 미설정 모드)"
+        print("[SMTP Warning] SENDER_PW가 설정되지 않았습니다.")
+        return False, "메일플러그 비밀번호(SENDER_PW)가 설정되지 않았습니다. Render 환경변수를 확인해주세요."
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
+    msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((str(Header("청년인쇄사", "utf-8")), sender_email))
     msg["To"] = receiver_email.strip()
 
     # HTML 본문 추가
     msg.attach(MIMEText(body_html, "html", "utf-8"))
 
-    # 첨부파일 추가 (견적서 PDF 등)
+    # 첨부파일 추가
     if attachment_bytes and attachment_name:
         part = MIMEApplication(attachment_bytes, _subtype="pdf")
         part.add_header("Content-Disposition", "attachment", filename=str(Header(attachment_name, "utf-8")))
         msg.attach(part)
 
+    last_err = ""
+    # 1차 시도: 포트 465 (SSL) - 타임아웃 5초
     try:
-        if MAILPLUG_SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(MAILPLUG_SMTP_SERVER, MAILPLUG_SMTP_PORT, timeout=15)
-        else:
-            server = smtplib.SMTP(MAILPLUG_SMTP_SERVER, MAILPLUG_SMTP_PORT, timeout=15)
-            server.starttls()
-            
+        server = smtplib.SMTP_SSL(MAILPLUG_SMTP_SERVER, 465, timeout=5)
         server.login(sender_email, sender_pw)
         server.sendmail(sender_email, [receiver_email.strip()], msg.as_string())
         server.quit()
         return True, f"[{receiver_email}] 주소로 견적서 메일이 성공적으로 전송되었습니다."
     except Exception as e:
-        print(f"[Mailplug SMTP Error] {e}")
-        return False, f"메일플러그 발송 실패: {str(e)}"
+        last_err = f"SSL(465): {str(e)}"
+        print(f"[Mailplug SMTP 465 Error] {last_err}")
+
+    # 2차 시도: 포트 587 (STARTTLS) - 타임아웃 5초
+    try:
+        server = smtplib.SMTP(MAILPLUG_SMTP_SERVER, 587, timeout=5)
+        server.starttls()
+        server.login(sender_email, sender_pw)
+        server.sendmail(sender_email, [receiver_email.strip()], msg.as_string())
+        server.quit()
+        return True, f"[{receiver_email}] 주소로 견적서 메일이 성공적으로 전송되었습니다 (STARTTLS)."
+    except Exception as e:
+        last_err += f" | STARTTLS(587): {str(e)}"
+        print(f"[Mailplug SMTP 587 Error] {last_err}")
+
+    return False, f"메일 발송 실패: {last_err}"
 
 # -------------------------------------------------------------------
 # [엔드포인트 1] 서버 헬스체크
@@ -127,7 +137,7 @@ def root():
     }
 
 # -------------------------------------------------------------------
-# [엔드포인트 2] 원고 PDF 규격 실시간 정밀 스캔 (/scan-pdf)
+# [엔드포인트 2] 원고 PDF 규격 정밀 스캔 (/scan-pdf)
 # -------------------------------------------------------------------
 @app.post("/scan-pdf")
 async def scan_pdf(file: UploadFile = File(...)):
@@ -142,7 +152,6 @@ async def scan_pdf(file: UploadFile = File(...)):
         total_pages = 1
         images_count = 1
 
-        # PDF 파싱 시도 (pypdf 또는 pypdf2)
         try:
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(contents))
@@ -150,13 +159,10 @@ async def scan_pdf(file: UploadFile = File(...)):
             if total_pages > 0:
                 first_page = reader.pages[0]
                 box = first_page.mediabox
-                # pt to mm (1 pt = 0.352778 mm)
                 pt_w = float(box.width)
                 pt_h = float(box.height)
                 width_mm = round(pt_w * 0.352778, 1)
                 height_mm = round(pt_h * 0.352778, 1)
-                
-                # 이미지 객체 카운트
                 try:
                     images_count = len(first_page.images)
                 except:
@@ -232,7 +238,7 @@ def get_inquiries():
             return []
 
 # -------------------------------------------------------------------
-# [엔드포인트 5] 메일플러그 견적서 자동 발송 엔진 (/send-quote)
+# [엔드포인트 5] 견적서 자동 발송 엔진 (/send-quote)
 # -------------------------------------------------------------------
 class QuoteSendRequest(BaseModel):
     org: str
@@ -245,13 +251,11 @@ class QuoteSendRequest(BaseModel):
 
 @app.post("/send-quote")
 async def send_quote(req: QuoteSendRequest):
-    # 수신 이메일 결정 (직접 입력값 또는 연락처 필드의 이메일)
     target_email = req.receiver_email
     if not target_email:
         if "@" in req.phone:
             target_email = req.phone.strip()
         else:
-            # 이메일이 없는 전화번호 고객인 경우 청년인쇄사 대표메일로 보관 발송
             target_email = MAILPLUG_SENDER_EMAIL
 
     subject = f"[청년인쇄사] {req.org} 담당자님, 요청하신 공식 견적서가 도착했습니다."
@@ -265,7 +269,7 @@ async def send_quote(req: QuoteSendRequest):
       <style>
         body {{ font-family: 'Pretendard', -apple-system, sans-serif; line-height: 1.6; color: #191f28; background: #f2f4f6; margin: 0; padding: 20px; }}
         .card {{ max-width: 620px; margin: 0 auto; background: #ffffff; border-radius: 18px; padding: 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); }}
-        .header {{ border-bottom: 2px solid #3182f6; padding-bottom: 16px; margin-bottom: 24px; }}
+        .header {{ border-bottom: 2px solid #3182F6; padding-bottom: 16px; margin-bottom: 24px; }}
         .title {{ font-size: 20px; font-weight: 800; color: #191f28; margin: 0; }}
         .sub {{ font-size: 13px; color: #8b95a1; margin-top: 4px; }}
         .amount-box {{ background: #0f172a; color: #ffffff; padding: 18px 24px; border-radius: 12px; margin: 20px 0; }}
