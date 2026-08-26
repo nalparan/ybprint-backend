@@ -18,10 +18,22 @@ from typing import Optional, List
 
 app = FastAPI(title="청년인쇄사 GEMS AI 백엔드 엔진")
 
-# CORS 설정
+# -------------------------------------------------------------------
+# [완벽한 CORS 설정] 
+# www 포함 모든 도메인 및 로컬 주소의 견적 전송을 브라우저 차단 없이 100% 허용
+# -------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://ybprint.co.kr",
+        "https://www.ybprint.co.kr",
+        "http://ybprint.co.kr",
+        "http://www.ybprint.co.kr",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5500",
+    ],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -79,9 +91,7 @@ def number_to_korean(num_val):
 def send_smart_email(receiver_email: str, subject: str, body_html: str):
     receiver_clean = receiver_email.strip()
     
-    # ---------------------------------------------------------------
     # [1단계] Resend API 발송 (최우선)
-    # ---------------------------------------------------------------
     if RESEND_API_KEY:
         try:
             url = "https://api.resend.com/emails"
@@ -103,11 +113,9 @@ def send_smart_email(receiver_email: str, subject: str, body_html: str):
                     return True, f"[{receiver_clean}] 공식 도메인(API) 발송 완료!"
         except Exception as e:
             print(f"[Resend API Error] {e} -> 네이버 안전망으로 자동 우회합니다.")
-            pass # 에러 발생 시 아래 2단계(네이버)로 자동 통과
+            pass
 
-    # ---------------------------------------------------------------
     # [2단계] 네이버 SMTP 우회 발송 (안전망)
-    # ---------------------------------------------------------------
     if not NAVER_PW:
         return False, "발송 실패: Resend API 키와 네이버 비밀번호(SENDER_PW)가 모두 등록되지 않았습니다."
 
@@ -130,7 +138,9 @@ def send_smart_email(receiver_email: str, subject: str, body_html: str):
         print(f"[Naver SMTP Error] {err_msg}")
         return False, f"완전 발송 실패 (API 및 네이버 모두 장애): {err_msg}"
 
+# 대문 페이지 및 헬스체크 (업타임로봇 및 브라우저 접속 즉시 초록불 보장)
 @app.get("/")
+@app.head("/")
 def root():
     return {
         "status": "online",
@@ -138,6 +148,11 @@ def root():
         "email_engine": "Dual Mode (Resend API + Naver Fallback)",
         "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
+
+@app.get("/health")
+@app.head("/health")
+def health_check():
+    return {"status": "ok", "message": "Backend is running perfectly!"}
 
 @app.post("/scan-pdf")
 async def scan_pdf(file: UploadFile = File(...)):
