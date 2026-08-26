@@ -4,6 +4,7 @@ import io
 import datetime
 import smtplib
 import urllib.request
+import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -138,7 +139,7 @@ def send_smart_email(receiver_email: str, subject: str, body_html: str):
         print(f"[Naver SMTP Error] {err_msg}")
         return False, f"완전 발송 실패 (API 및 네이버 모두 장애): {err_msg}"
 
-# 대문 페이지 및 헬스체크 (업타임로봇 및 브라우저 접속 즉시 초록불 보장)
+# 대문 페이지 및 헬스체크
 @app.get("/")
 @app.head("/")
 def root():
@@ -201,14 +202,28 @@ async def scan_pdf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# -------------------------------------------------------------------
+# [핵심 수정: 실제 첨부 파일(PDF 등)을 서버 uploads 폴더에 정상 저장]
+# -------------------------------------------------------------------
 @app.post("/submit-inquiry")
 async def submit_inquiry(
     org: str = Form(...),
     phone: str = Form(...),
     inquiry: str = Form(""),
     file_name: str = Form("첨부파일 없음"),
-    spec: str = Form("직접 문의 접수")
+    spec: str = Form("직접 문의 접수"),
+    file: Optional[List[UploadFile]] = File(None)
 ):
+    # 전송받은 실제 파일들을 서버 uploads 디렉토리에 저장
+    if file:
+        for f in file:
+            if f.filename:
+                safe_name = os.path.basename(f.filename)
+                save_dest = os.path.join(UPLOAD_DIR, safe_name)
+                contents = await f.read()
+                with open(save_dest, "wb") as out_file:
+                    out_file.write(contents)
+
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_inquiry = {
         "id": int(datetime.datetime.now().timestamp() * 1000),
@@ -232,7 +247,7 @@ async def submit_inquiry(
         with open(INQUIRIES_FILE, "w", encoding="utf-8") as f:
             json.dump(inquiries, f, ensure_ascii=False, indent=2)
 
-        return {"status": "success", "message": "접수가 정상 완료되었습니다.", "data": new_inquiry}
+        return {"status": "success", "message": "접수 및 파일 저장이 정상 완료되었습니다.", "data": new_inquiry}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"저장 오류: {str(e)}")
 
@@ -349,9 +364,27 @@ async def send_quote(req: QuoteSendRequest):
         "target": target_email
     }
 
-@app.get("/download/{filename}")
+# -------------------------------------------------------------------
+# [핵심 수정: 한글/공백(%20) 완벽 디코딩 및 한글 파일명 다운로드 헤더 지원]
+# -------------------------------------------------------------------
+@app.get("/download/{filename:path}")
 def download_file(filename: str):
-    file_path = os.path.join(UPLOAD_DIR, filename)
+    decoded_name = urllib.parse.unquote(filename).strip()
+    file_path = os.path.join(UPLOAD_DIR, decoded_name)
+
+    if not os.path.exists(file_path):
+        if os.path.exists(UPLOAD_DIR):
+            for existing in os.listdir(UPLOAD_DIR):
+                if existing == decoded_name or existing == filename:
+                    file_path = os.path.join(UPLOAD_DIR, existing)
+                    decoded_name = existing
+                    break
+
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
-    return FileResponse(file_path, filename=filename)
+
+    encoded_name = urllib.parse.quote(decoded_name)
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"
+    }
+    return FileResponse(file_path, headers=headers, media_type="application/octet-stream")
