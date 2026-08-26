@@ -50,7 +50,7 @@ if not os.path.exists(INQUIRIES_FILE):
     with open(INQUIRIES_FILE, "w", encoding="utf-8") as f:
         json.dump([], f, ensure_ascii=False, indent=2)
 
-# --- 알리고 비동기 발송 모듈 ---
+# --- 알리고 알림톡 모듈 ---
 ALIGO_USERID = os.getenv("ALIGO_USERID", "")
 ALIGO_APIKEY = os.getenv("ALIGO_APIKEY", "")
 ALIGO_SENDER = os.getenv("ALIGO_SENDER", "")
@@ -61,7 +61,7 @@ def send_aligo_alimtalk_bg(phone: str, org: str, template: str, book_count: int,
     백그라운드에서 실행되며 실패하더라도 메인 시스템(메일/저장)에 영향을 주지 않음
     """
     if not all([ALIGO_USERID, ALIGO_APIKEY, ALIGO_SENDER, ALIGO_SENDERKEY]):
-        print("[Aligo] 환경변수 누락으로 알림톡 발송 스킵")
+        print(f"[Aligo] 환경변수 누락 - USERID:{bool(ALIGO_USERID)}, KEY:{bool(ALIGO_APIKEY)}, SENDER:{bool(ALIGO_SENDER)}, SENDERKEY:{bool(ALIGO_SENDERKEY)}")
         return
 
     try:
@@ -72,7 +72,7 @@ def send_aligo_alimtalk_bg(phone: str, org: str, template: str, book_count: int,
         amt_format = f"{total_num:,}"
         unit_format = f"{unit_price:,}"
         
-        # 카카오 승인 규격과 100% 일치하는 본문
+        # 카카오 승인 템플릿과 100% 동일한 텍스트
         message = f"""[청년인쇄사] 견적 안내드립니다.
 
 {org} 담당자님, 청년인쇄사에 견적을 문의해 주셔서 감사합니다.
@@ -87,32 +87,36 @@ def send_aligo_alimtalk_bg(phone: str, org: str, template: str, book_count: int,
 
 ☎ 직통 문의 : 044-862-4803"""
 
+        # 카카오/알리고 표준 버튼 규격
         button_info = {
             "button": [
                 {
                     "name": "견적서 확인하기",
                     "linkType": "WL",
+                    "linkTypeName": "웹링크",
+                    "linkMo": "https://ybprint.co.kr",
                     "linkPc": "https://ybprint.co.kr",
-                    "linkMo": "https://ybprint.co.kr"
+                    "linkM": "https://ybprint.co.kr",
+                    "linkP": "https://ybprint.co.kr"
                 }
             ]
         }
 
-        # 1. 토큰 생성
-        token_url = "https://kakaoapi.aligo.in/akv10/token/create/30/d/"
+        # 1. 알리고 토큰 발급
+        token_url = "https://kakaoapi.aligo.in/akv10/token/create/30/s/"
         token_data = urllib.parse.urlencode({'apikey': ALIGO_APIKEY, 'userid': ALIGO_USERID}).encode('utf-8')
         token_req = urllib.request.Request(token_url, data=token_data)
         
         with urllib.request.urlopen(token_req, timeout=5) as res:
             token_res = json.loads(res.read().decode('utf-8'))
             if token_res.get('code') != 0:
-                print(f"[Aligo Token Error] {token_res.get('message')}")
+                print(f"[Aligo Token Fail] {token_res}")
                 return
             token = token_res.get('token')
 
-        # 2. 알림톡 발송
+        # 2. 알림톡 발송 요청
         send_url = "https://kakaoapi.aligo.in/akv10/alimtalk/send/"
-        clean_phone = phone.replace("-", "").strip()
+        clean_phone = phone.replace("-", "").replace(" ", "").strip()
         
         send_data = {
             'apikey': ALIGO_APIKEY,
@@ -124,7 +128,8 @@ def send_aligo_alimtalk_bg(phone: str, org: str, template: str, book_count: int,
             'receiver_1': clean_phone,
             'subject_1': '청년인쇄사 견적서 안내',
             'message_1': message,
-            'button_1': json.dumps(button_info, ensure_ascii=False)
+            'button_1': json.dumps(button_info, ensure_ascii=False),
+            'failover': 'N'
         }
         
         encoded_send_data = urllib.parse.urlencode(send_data).encode('utf-8')
@@ -132,10 +137,10 @@ def send_aligo_alimtalk_bg(phone: str, org: str, template: str, book_count: int,
         
         with urllib.request.urlopen(send_req, timeout=5) as res:
             send_result = json.loads(res.read().decode('utf-8'))
-            print(f"[Aligo Send Result] {send_result}")
+            print(f"[Aligo Send Result] 수신번호: {clean_phone}, 응답: {send_result}")
 
     except Exception as e:
-        print(f"[Aligo Background Error] {str(e)}")
+        print(f"[Aligo Background Exception] {str(e)}")
 
 # --- 한글 금액 변환 유틸리티 ---
 def number_to_korean(num_val):
@@ -201,13 +206,16 @@ def send_smart_email(receiver_email: str, subject: str, body_html: str):
     except Exception as e:
         return False, f"발송 실패: {str(e)}"
 
-# --- 라우터 엔드포인트 ---
-@app.get("/")
-def root(): return {"status": "online", "service": "GEMS AI Backend"}
+# --- UptimeRobot 및 상태 체크 전용 (모든 HTTP Method 200 OK 응답) ---
+@app.api_route("/", methods=["GET", "HEAD", "POST", "OPTIONS"])
+def root(): 
+    return {"status": "online", "service": "GEMS AI Backend"}
 
-@app.get("/health")
-def health_check(): return {"status": "ok"}
+@app.api_route("/health", methods=["GET", "HEAD", "POST", "OPTIONS"])
+def health_check(): 
+    return {"status": "ok"}
 
+# --- 핵심 기능 엔드포인트 ---
 @app.post("/scan-pdf")
 async def scan_pdf(file: UploadFile = File(...)):
     try:
@@ -266,12 +274,15 @@ async def send_quote(req: QuoteSendRequest, background_tasks: BackgroundTasks):
     if not target_email:
         target_email = req.phone.strip() if "@" in req.phone else OFFICIAL_REPLY_EMAIL
 
-    # 연락처 입력 시 백그라운드 알림톡 전송
-    if "-" in req.phone or req.phone.isdigit():
+    # 전화번호 입력 시 백그라운드 알림톡 전송
+    clean_p = req.phone.replace("-", "").replace(" ", "").strip()
+    if clean_p.isdigit() and len(clean_p) >= 9:
         background_tasks.add_task(
             send_aligo_alimtalk_bg,
-            req.phone, req.org, req.template, req.book_count, req.detected_pages, req.total_amount
+            clean_p, req.org, req.template, req.book_count, req.detected_pages, req.total_amount
         )
+    else:
+        print(f"[Aligo Skip] 유효한 휴대폰 번호가 아님: {req.phone}")
 
     # 이메일 발송
     subject = f"[청년인쇄사] {req.org} 담당자님, 요청하신 공식 견적서가 도착했습니다."
