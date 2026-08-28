@@ -244,7 +244,20 @@ async def submit_inquiry(org: str = Form(...), phone: str = Form(...), inquiry: 
             if f.filename:
                 contents = await f.read()
                 with open(os.path.join(UPLOAD_DIR, os.path.basename(f.filename)), "wb") as out_file: out_file.write(contents)
-    new_inquiry = {"id": int(datetime.datetime.now().timestamp() * 1000), "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "org": org.strip(), "phone": phone.strip(), "inquiry": inquiry.strip(), "file_name": file_name.strip(), "spec": spec.strip()}
+    
+    # 한국 표준시(KST, UTC+9) 적용
+    kst = datetime.timezone(datetime.timedelta(hours=9))
+    now_kst = datetime.datetime.now(kst)
+    
+    new_inquiry = {
+        "id": int(now_kst.timestamp() * 1000),
+        "timestamp": now_kst.strftime("%Y-%m-%d %H:%M:%S"),
+        "org": org.strip(),
+        "phone": phone.strip(),
+        "inquiry": inquiry.strip(),
+        "file_name": file_name.strip(),
+        "spec": spec.strip()
+    }
     try:
         inquiries = []
         if os.path.exists(INQUIRIES_FILE):
